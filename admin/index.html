@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Macro Cooks — Admin (Creator Studio)</title>
+<style>
+body{font-family:system-ui,Arial,sans-serif;max-width:620px;margin:24px auto;padding:0 16px;color:#2a201d}
+h1{color:#7a2e2e} input,button,select{font-size:15px;padding:9px;margin:4px 0;width:100%;box-sizing:border-box}
+button{background:#7a2e2e;color:#fff;border:none;border-radius:8px;cursor:pointer;width:auto;padding:10px 16px}
+.card{border:1px solid #e7d8d0;border-radius:12px;padding:16px;margin:14px 0}
+.muted{color:#8a7c76;font-size:13px} .ok{color:#2f9e44}.err{color:#c0392b}
+</style></head><body>
+<h1>Macro Cooks — Creator Studio (Admin)</h1>
+<p class="muted">Test console for the backend. Log in with an <b>admin</b> account, upload a video to Cloudflare Stream, then publish it.</p>
+
+<div class="card"><b>1. Log in</b>
+<input id="email" placeholder="admin email">
+<input id="password" type="password" placeholder="password">
+<button onclick="login()">Log in</button> <span id="loginMsg" class="muted"></span></div>
+
+<div class="card"><b>2. Upload a video</b>
+<input id="file" type="file" accept="video/*">
+<button onclick="upload()">Upload to Cloudflare Stream</button>
+<div id="uploadMsg" class="muted"></div></div>
+
+<div class="card"><b>3. Publish the class</b>
+<input id="title" placeholder="Title (e.g. Perfect pilau in 30 min)">
+<input id="chef" placeholder="Chef / author">
+<select id="premium"><option value="false">Free</option><option value="true">Premium</option></select>
+<button onclick="publish()">Publish to Learn</button>
+<div id="publishMsg" class="muted"></div></div>
+
+<div class="card"><b>Published classes</b> <button onclick="loadClasses()">Refresh</button>
+<div id="list"></div></div>
+
+<script>
+let token='', uid='';
+const api=(p,o={})=>fetch(p,{...o,headers:{'Content-Type':'application/json','Authorization':token?'Bearer '+token:'',...(o.headers||{})}});
+async function login(){
+  const r=await api('/api/auth/login',{method:'POST',body:JSON.stringify({email:email.value,password:password.value})});
+  const j=await r.json(); if(j.token){token=j.token;loginMsg.textContent='Logged in as '+(j.user.role)+'';loginMsg.className='ok';}
+  else {loginMsg.textContent=j.error||'failed';loginMsg.className='err';}
+}
+async function upload(){
+  if(!file.files[0]){uploadMsg.textContent='Pick a file first';return;}
+  uploadMsg.textContent='Requesting upload URL...';
+  const r=await api('/api/content/admin/upload-url',{method:'POST'}); const j=await r.json();
+  if(!j.uploadURL){uploadMsg.textContent='Error: '+(j.error||JSON.stringify(j));uploadMsg.className='err';return;}
+  uid=j.uid; uploadMsg.textContent='Uploading to Cloudflare...';
+  const fd=new FormData(); fd.append('file',file.files[0]);
+  const up=await fetch(j.uploadURL,{method:'POST',body:fd});
+  uploadMsg.textContent=up.ok?('Uploaded. Video UID: '+uid):'Upload failed'; uploadMsg.className=up.ok?'ok':'err';
+}
+async function publish(){
+  if(!uid){publishMsg.textContent='Upload a video first';return;}
+  const r=await api('/api/content/admin/classes',{method:'POST',body:JSON.stringify({title:title.value,chef:chef.value,is_premium:premium.value==='true',stream_uid:uid})});
+  const j=await r.json(); publishMsg.textContent=j.ok?'Published!':(j.error||'failed'); publishMsg.className=j.ok?'ok':'err'; if(j.ok){uid='';loadClasses();}
+}
+async function loadClasses(){
+  const r=await fetch('/api/content/classes'); const j=await r.json();
+  list.innerHTML=(j.classes||[]).map(c=>'<div>'+(c.is_premium?'⭐ ':'')+c.title+' — <span class="muted">'+(c.chef||'')+'</span></div>').join('')||'<span class="muted">None yet.</span>';
+}
+loadClasses();
+</script></body></html>
