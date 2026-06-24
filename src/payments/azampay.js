@@ -8,6 +8,7 @@
  * Confirm the EXACT URLs, headers and field names against the CURRENT AzamPay docs
  * (developer portal) and TEST in their sandbox before switching to production.
  */
+const crypto = require('crypto');
 const AUTH_BASE     = process.env.AZAMPAY_AUTH_BASE_URL     || 'https://authenticator-sandbox.azampay.co.tz';
 const CHECKOUT_BASE = process.env.AZAMPAY_CHECKOUT_BASE_URL || 'https://sandbox.azampay.co.tz';
 
@@ -29,8 +30,10 @@ async function getToken() {
 
 // 2) Push a payment prompt to the phone.
 //    network = "Mpesa" | "Tigo" | "Airtel" | "Halopesa" | "Azampesa"
-async function initiateMobileMoney({ orderRef, amountTzs, phone, network }) {
+//    Pass the (TZS) amount as `amountTzs` (preferred) or `amount`; it is forwarded to AzamPay.
+async function initiateMobileMoney({ orderRef, amountTzs, amount, phone, network }) {
   const token = await getToken();
+  const payAmount = amountTzs != null ? amountTzs : amount;
   const res = await fetch(CHECKOUT_BASE + '/azampay/mno/checkout', {
     method: 'POST',
     headers: {
@@ -40,7 +43,7 @@ async function initiateMobileMoney({ orderRef, amountTzs, phone, network }) {
     },
     body: JSON.stringify({
       accountNumber: phone,
-      amount: String(amountTzs),
+      amount: String(payAmount),
       currency: 'TZS',
       externalId: orderRef,
       provider: network || 'Mpesa'
@@ -51,16 +54,42 @@ async function initiateMobileMoney({ orderRef, amountTzs, phone, network }) {
   return j; // expect a transactionId / reference + success flag
 }
 
+// 3) (optional) Re-confirm a transaction directly with AzamPay before granting access.
+//    Configure AZAMPAY_STATUS_URL (and the provider's expected response shape) to enable.
+//    Returns { paid: true|false } or throws/returns null when verification is unavailable.
+async function getTransactionStatus(ref) {
+  const url = process.env.AZAMPAY_STATUS_URL;
+  if (!url || !ref) return null; // not configured -> caller falls back to signature + amount checks
+  const token = await getToken();
+  const res = await fetch(url.replace('{ref}', encodeURIComponent(ref)), {
+    headers: { 'Authorization': 'Bearer ' + token }
+  });
+  if (!res.ok) return null;
+  const j = await res.json().catch(() => ({}));
+  const s = String((j.data && j.data.transactionStatus) || j.transactionStatus || j.status || '').toUpperCase();
+  if (!s) return null;
+  return { paid: ['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(s) };
+}
+
 /*
- * 3) Verify the callback is genuine. AzamPay does not send a standard HMAC, so the
- *    recommended protections are: keep the callback URL secret, allow-list AzamPay's
- *    IPs at your host, and (best) re-check the transaction status via AzamPay before
- *    granting. As a simple extra check, set AZAMPAY_CALLBACK_TOKEN and include it as a
- *    header/query value on your registered callback URL; we compare it here.
+ * 4) Verify the callback is genuine. AzamPay does not send a standard HMAC, so the
+ *    protections are: keep the callback secret, allow-list AzamPay's IPs at your host,
+ *    re-check the transaction status (getTransactionStatus above), AND require a shared
+ *    AZAMPAY_CALLBACK_TOKEN sent as a request HEADER (never a URL query string).
+ *
+ *    SECURITY: this FAILS CLOSED. With no token configured we reject every callback,
+ *    so a misconfigured deployment can't be tricked into granting paid access for free.
  */
 function verifyWebhook(rawBody, signatureHeader) {
   const expected = process.env.AZAMPAY_CALLBACK_TOKEN || '';
-  if (!expected) return true; // configure AZAMPAY_CALLBACK_TOKEN in production
-  return (signatureHeader || '').includes(expected);
+  if (!expected) {
+    console.warn('[azampay] AZAMPAY_CALLBACK_TOKEN not set — rejecting webhook (fail closed).');
+    return false;
+  }
+  const provided = String(signatureHeader || '').replace(/^Bearer\s+/i, '');
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(a, b); } catch (e) { return false; }
 }
-module.exports = { getToken, initiateMobileMoney, verifyWebhook };
+module.exports = { getToken, initiateMobileMoney, verifyWebhook, getTransactionStatus };
