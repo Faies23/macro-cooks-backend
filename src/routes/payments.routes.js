@@ -39,28 +39,43 @@ router.post('/checkout', authRequired, wrap(async (req, res) => {
     // Forward the amount (TZS), phone and network to the AzamPay MNO checkout push.
     pr = await provider.initiateMobileMoney({ orderRef: orderId, amountTzs: tzs, phone, network });
   } catch (e) {
+    // Surface the provider's actual reason in the Render logs. Vital during sandbox
+    // integration: field names and URLs must match AzamPay's current docs.
+    console.error('AZAMPAY CHECKOUT ERROR:', (e && e.message) || e);
     await query("update orders set status='failed', updated_at=now() where id=$1", [orderId]);
-    return res.status(502).json({ error: 'Payment init failed' });
+    const detail = process.env.NODE_ENV === 'production' ? undefined : String((e && e.message) || e);
+    return res.status(502).json({ error: 'Payment init failed', detail });
   }
   // Save the provider reference so the webhook can match the callback back to this order.
+  const providerRef = (pr && (pr.transactionId || pr.reference || pr.id)) || null;
   await query('update orders set provider_ref=$1, updated_at=now() where id=$2',
-    [(pr && (pr.transactionId || pr.reference || pr.id)) || null, orderId]);
+    [providerRef, orderId]);
 
-  res.json({ orderId, status: 'pending', message: 'Approve the prompt on your phone.' });
+  // providerRef is the AzamPay transaction id; returned so it can be shared for
+  // sandbox integration sign-off without querying the database.
+  res.json({ orderId, providerRef, status: 'pending', message: 'Approve the prompt on your phone.' });
 }));
 
 // 2) Webhook/callback: AzamPay posts the result here -> grant a time-limited entitlement.
 //    SECURITY: the webhook is an UNTRUSTED trigger, never the source of truth. We:
-//    (a) require a valid signature/token (fail closed — see provider.verifyWebhook),
+//    (a) require a valid signature/token (fail closed â€” see provider.verifyWebhook),
 //    (b) only transition orders that are still 'pending' (idempotent / no downgrade),
 //    (c) verify the reported amount/currency against the stored order,
 //    (d) re-confirm with the provider when a status API is available,
 //    before granting any entitlement.
 const handleWebhook = wrap(async (req, res) => {
   const raw = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body || {});
-  // Token must arrive in a header, NOT the URL query (query strings leak via access logs).
-  const sig = req.headers['x-azampay-signature'] || req.headers['authorization'] || '';
-  if (!provider.verifyWebhook(raw, sig)) return res.status(401).send('bad signature');
+  // AzamPay sends the shared secret as a ?token= query parameter on the callback URL,
+  // so we accept that as well as the header forms. Header is preferred (query strings can
+  // appear in access logs); the check still fails closed when no token matches.
+  const sig = req.headers['x-azampay-signature']
+    || req.headers['authorization']
+    || (req.query && (req.query.token || req.query.Token))
+    || '';
+  if (!provider.verifyWebhook(raw, sig)) {
+    console.warn('[webhook] rejected: callback token did not match AZAMPAY_CALLBACK_TOKEN');
+    return res.status(401).send('bad signature');
+  }
 
   const evt = req.body || {};
   // Match on our order id first; fall back to the provider's transaction reference.
@@ -70,7 +85,7 @@ const handleWebhook = wrap(async (req, res) => {
 
   if (['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(status)) {
     // Look up the order while it is still pending; anything else is a replay / already-handled.
-    // Find by our id, or by the provider_ref we saved at checkout — whichever the callback carries.
+    // Find by our id, or by the provider_ref we saved at checkout â€” whichever the callback carries.
     const ord = await query(
       "select id, user_id, product, cycle, amount_tzs, provider_ref from orders " +
       "where status='pending' and (id=$1 or provider_ref=$2) limit 1",
@@ -96,7 +111,7 @@ const handleWebhook = wrap(async (req, res) => {
           console.warn('[webhook] provider says NOT paid for order', order.id);
           return res.status(200).send('ignored');
         }
-      } catch (e) { /* provider check unavailable — fall through to the gated grant */ }
+      } catch (e) { /* provider check unavailable â€” fall through to the gated grant */ }
     }
 
     // Idempotent transition: only flips a row that is still pending.
@@ -109,7 +124,7 @@ const handleWebhook = wrap(async (req, res) => {
       const { user_id, product, cycle } = r.rows[0];
       const days = getDays(cycle);
       // One time-limited entitlement for the purchased product. Tiers are cumulative,
-      // but the app maps that itself from the active product names — so we grant just one row.
+      // but the app maps that itself from the active product names â€” so we grant just one row.
       await query(
         "insert into entitlements(user_id,product,expires_at) values($1,$2, now() + ($3::int * interval '1 day'))",
         [user_id, product, days]
