@@ -69,11 +69,17 @@ function rateLimit({ windowMs, max, message, key }) {
 // one person's typos. The strict bucket is per account (IP plus the submitted email), which
 // is what actually stops guessing against a specific user, backed by a much higher per-IP
 // ceiling that still stops a flood from one source.
+// Keyed on the ACCOUNT alone, deliberately not on the IP. Behind Render's proxy the
+// perceived client address is not stable, so folding it into this key silently defeated the
+// limit: every attempt landed in a fresh bucket and nothing was ever throttled. Guessing a
+// password is an attack on one account no matter where it comes from, so the account is the
+// right thing to count. The separate per-IP limiter below still catches a flood from one
+// source, and falls back to the IP only when no email was supplied.
 const authKey = (req) => {
-  const ip = req.ip || (req.connection && req.connection.remoteAddress) || 'unknown';
   const email = req.body && typeof req.body.email === 'string'
     ? req.body.email.trim().toLowerCase() : '';
-  return email ? 'acct:' + ip + '|' + email : 'ip:' + ip;
+  if (email) return 'acct:' + email;
+  return 'ip:' + (req.ip || (req.connection && req.connection.remoteAddress) || 'unknown');
 };
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 20, key: authKey,
