@@ -1,0 +1,21 @@
+# Secrets. Never commit real env files.
+.env
+.env.*
+!.env.example
+
+# This repository is public. db-test/ holds the live database connection string and
+# password used by the local helper scripts, so it must never be added to a commit.
+db-test/
+connection.txt
+*PASSWORD*.txt
+entitlements-backup.json
+
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor cruft
+.DS_Store
