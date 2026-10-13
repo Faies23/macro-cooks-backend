@@ -58,7 +58,7 @@ router.post('/checkout', authRequired, wrap(async (req, res) => {
 
 // 2) Webhook/callback: AzamPay posts the result here -> grant a time-limited entitlement.
 //    SECURITY: the webhook is an UNTRUSTED trigger, never the source of truth. We:
-//    (a) require a valid signature/token (fail closed â€” see provider.verifyWebhook),
+//    (a) require a valid signature/token (fail closed, see provider.verifyWebhook),
 //    (b) only transition orders that are still 'pending' (idempotent / no downgrade),
 //    (c) verify the reported amount/currency against the stored order,
 //    (d) re-confirm with the provider when a status API is available,
@@ -84,14 +84,16 @@ const handleWebhook = wrap(async (req, res) => {
   const txnRef = evt.transactionId || evt.reference || evt.transactionref || null;
   const status = String(evt.transactionstatus || evt.status || evt.paymentStatus || '').toUpperCase();
 
+  // `id` is a uuid column: only compare it when the callback carried a real uuid,
+  // otherwise Postgres raises "invalid input syntax for type uuid" and the webhook 500s.
+  // Both the success and the failure branch match on these, so resolve them once here.
+  const idParam = (typeof orderRef === 'string' && UUID_RE.test(orderRef)) ? orderRef : null;
+  const refParam = (typeof txnRef === 'string' && txnRef) ? txnRef : null;
+  if (!idParam && !refParam) return res.status(200).send('ok'); // nothing to match on
+
   if (['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(status)) {
     // Look up the order while it is still pending; anything else is a replay / already-handled.
-    // Find by our id, or by the provider_ref we saved at checkout â€” whichever the callback carries.
-    // `id` is a uuid column: only compare it when the callback carried a real uuid,
-    // otherwise Postgres raises "invalid input syntax for type uuid" and the webhook 500s.
-    const idParam = (typeof orderRef === 'string' && UUID_RE.test(orderRef)) ? orderRef : null;
-    const refParam = (typeof txnRef === 'string' && txnRef) ? txnRef : null;
-    if (!idParam && !refParam) return res.status(200).send('ok'); // nothing to match on
+    // Find by our id, or by the provider_ref we saved at checkout, whichever the callback carries.
     const ord = await query(
       "select id, user_id, product, cycle, amount_tzs, provider_ref from orders " +
       "where status='pending' and (id=$1 or provider_ref=$2) limit 1",
@@ -117,7 +119,7 @@ const handleWebhook = wrap(async (req, res) => {
           console.warn('[webhook] provider says NOT paid for order', order.id);
           return res.status(200).send('ignored');
         }
-      } catch (e) { /* provider check unavailable â€” fall through to the gated grant */ }
+      } catch (e) { /* provider check unavailable, fall through to the gated grant */ }
     }
 
     // Idempotent transition: only flips a row that is still pending.
@@ -130,7 +132,7 @@ const handleWebhook = wrap(async (req, res) => {
       const { user_id, product, cycle } = r.rows[0];
       const days = getDays(cycle);
       // One time-limited entitlement for the purchased product. Tiers are cumulative,
-      // but the app maps that itself from the active product names â€” so we grant just one row.
+      // but the app maps that itself from the active product names, so we grant just one row.
       await query(
         "insert into entitlements(user_id,product,expires_at) values($1,$2, now() + ($3::int * interval '1 day'))",
         [user_id, product, days]
@@ -138,11 +140,12 @@ const handleWebhook = wrap(async (req, res) => {
     }
   } else if (['FAILED', 'FAILURE', 'CANCELLED'].includes(status)) {
     // Never let a late/forged FAILED downgrade an order that is already paid.
-    const ref = (typeof orderRef === 'string' && orderRef) || null;
-    const txn = (typeof txnRef === 'string' && txnRef) || null;
+    // Uses the same guarded params as the success branch: a non-uuid reference is
+    // nulled out, so a real mobile-money code like MPESA9TZ8KQ0X2 can no longer
+    // raise "invalid input syntax for type uuid" and turn this into an HTTP 500.
     await query(
       "update orders set status='failed', updated_at=now() where status='pending' and (id=$1 or provider_ref=$2)",
-      [ref, txn]
+      [idParam, refParam]
     );
   }
   res.status(200).send('ok');
