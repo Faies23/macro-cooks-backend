@@ -1,5 +1,5 @@
 const router = require('express').Router();
-const { query } = require('../db');
+const { pool, query } = require('../db');
 const { authRequired } = require('../auth');
 const provider = require('../payments/azampay'); // active provider (swap this require to change provider)
 const { getAmount, getDays, isProduct, isCycle } = require('../pricing');
@@ -41,10 +41,16 @@ router.post('/checkout', authRequired, wrap(async (req, res) => {
   } catch (e) {
     // Surface the provider's actual reason in the Render logs. Vital during sandbox
     // integration: field names and URLs must match AzamPay's current docs.
-    console.error('AZAMPAY CHECKOUT ERROR:', (e && e.message) || e);
-    await query("update orders set status='failed', updated_at=now() where id=$1", [orderId]);
+    //
+    // Deliberately DO NOT mark the order failed here. A thrown error does not mean the push
+    // was never sent: a cold start, a socket timeout, or a 5xx from the provider edge can all
+    // arrive after the prompt already reached the customer's phone. Writing a terminal
+    // 'failed' on that ambiguous outcome means the customer approves, is debited, and the
+    // later SUCCESS callback finds a non-pending order and silently drops the payment.
+    // A pending order that never settles costs nothing; a wrongly failed one loses real money.
+    console.error('AZAMPAY CHECKOUT ERROR for order', orderId, ':', (e && e.message) || e);
     const detail = process.env.NODE_ENV === 'production' ? undefined : String((e && e.message) || e);
-    return res.status(502).json({ error: 'Payment init failed', detail });
+    return res.status(502).json({ error: 'Payment init failed', orderId, detail });
   }
   // Save the provider reference so the webhook can match the callback back to this order.
   const providerRef = (pr && (pr.transactionId || pr.reference || pr.id)) || null;
@@ -92,11 +98,14 @@ const handleWebhook = wrap(async (req, res) => {
   if (!idParam && !refParam) return res.status(200).send('ok'); // nothing to match on
 
   if (['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(status)) {
-    // Look up the order while it is still pending; anything else is a replay / already-handled.
-    // Find by our id, or by the provider_ref we saved at checkout, whichever the callback carries.
+    // Find by our id, or by the provider_ref we saved at checkout, whichever the callback
+    // carries. Match any order that is not already paid, not only a pending one. If checkout could
+    // not confirm the push the order may be sitting in another state, and this callback is
+    // the provider telling us the money actually moved. Idempotency is preserved because a
+    // row that is already 'paid' is excluded here and in the guarded update below.
     const ord = await query(
       "select id, user_id, product, cycle, amount_tzs, provider_ref from orders " +
-      "where status='pending' and (id=$1 or provider_ref=$2) limit 1",
+      "where status <> 'paid' and (id=$1 or provider_ref=$2) limit 1",
       [idParam, refParam]
     );
     if (!ord.rows[0]) return res.status(200).send('ok'); // unknown id or already settled -> no-op
@@ -122,26 +131,47 @@ const handleWebhook = wrap(async (req, res) => {
       } catch (e) { /* provider check unavailable, fall through to the gated grant */ }
     }
 
-    // Idempotent transition: only flips a row that is still pending.
-    const r = await query(
-      "update orders set status='paid', updated_at=now() where id=$1 and status='pending' " +
-      'returning user_id, product, cycle',
-      [order.id]
-    );
-    if (r.rows[0]) {
-      const { user_id, product, cycle } = r.rows[0];
-      const days = getDays(cycle);
-      // One time-limited entitlement per payment. Tiers are cumulative, but the app maps
-      // that itself from the active product names, so we grant just one row.
-      // A renewal extends from the current expiry so paying again never throws away time
-      // the customer has already bought; a lapsed entitlement simply starts from now.
-      await query(
-        "insert into entitlements(user_id,product,expires_at) select $1,$2, " +
-        "greatest(now(), coalesce((select max(expires_at) from entitlements " +
-        "where user_id=$1 and product=$2), now())) + ($3::int * interval '1 day')",
-        [user_id, product, days]
+    // Flip the order and grant the entitlement in ONE transaction on ONE connection.
+    // Run as two auto-commit statements these can half-apply: the order reads 'paid' while
+    // the grant fails, leaving a paying customer with no access and no way back, because the
+    // guarded update will never match that row again. Committing them together means the
+    // sale is either fully recorded or not recorded at all.
+    const client = await pool.connect();
+    let granted = false;
+    try {
+      await client.query('begin');
+      // Idempotent transition: only flips a row that is not already paid.
+      const r = await client.query(
+        "update orders set status='paid', updated_at=now() where id=$1 and status <> 'paid' " +
+        'returning user_id, product, cycle',
+        [order.id]
       );
+      if (r.rows[0]) {
+        const { user_id, product, cycle } = r.rows[0];
+        const days = getDays(cycle);
+        // One time-limited entitlement per payment. Tiers are cumulative, but the app maps
+        // that itself from the active product names, so we grant just one row.
+        // A renewal extends from the current expiry so paying again never throws away time
+        // the customer has already bought; a lapsed entitlement simply starts from now.
+        await client.query(
+          "insert into entitlements(user_id,product,expires_at) select $1,$2, " +
+          "greatest(now(), coalesce((select max(expires_at) from entitlements " +
+          "where user_id=$1 and product=$2), now())) + ($3::int * interval '1 day')",
+          [user_id, product, days]
+        );
+        granted = true;
+      }
+      await client.query('commit');
+    } catch (e) {
+      await client.query('rollback').catch(() => {});
+      // Answer non-2xx so AzamPay retries this callback. Swallowing it with a 200 would
+      // tell the provider the payment was handled when the customer got nothing.
+      console.error('[webhook] settlement FAILED for order', order.id, ':', (e && e.message) || e);
+      return res.status(500).send('settlement failed');
+    } finally {
+      client.release();
     }
+    if (granted) console.log('[webhook] settled order', order.id);
   } else if (['FAILED', 'FAILURE', 'CANCELLED'].includes(status)) {
     // Never let a late/forged FAILED downgrade an order that is already paid.
     // Uses the same guarded params as the success branch: a non-uuid reference is
