@@ -131,10 +131,14 @@ const handleWebhook = wrap(async (req, res) => {
     if (r.rows[0]) {
       const { user_id, product, cycle } = r.rows[0];
       const days = getDays(cycle);
-      // One time-limited entitlement for the purchased product. Tiers are cumulative,
-      // but the app maps that itself from the active product names, so we grant just one row.
+      // One time-limited entitlement per payment. Tiers are cumulative, but the app maps
+      // that itself from the active product names, so we grant just one row.
+      // A renewal extends from the current expiry so paying again never throws away time
+      // the customer has already bought; a lapsed entitlement simply starts from now.
       await query(
-        "insert into entitlements(user_id,product,expires_at) values($1,$2, now() + ($3::int * interval '1 day'))",
+        "insert into entitlements(user_id,product,expires_at) select $1,$2, " +
+        "greatest(now(), coalesce((select max(expires_at) from entitlements " +
+        "where user_id=$1 and product=$2), now())) + ($3::int * interval '1 day')",
         [user_id, product, days]
       );
     }
@@ -154,6 +158,20 @@ const handleWebhook = wrap(async (req, res) => {
 // AzamPay posts here. Keep /callback as an alias for older configurations.
 router.post('/webhook', handleWebhook);
 router.post('/callback', handleWebhook);
+
+// A GET is never a real callback, but people do paste this URL into a browser to check the
+// endpoint is alive, and some provider dashboards probe it the same way. Without this the
+// request falls through to the catch-all 404 and reads as "the callback URL is wrong", which
+// is misleading. Answer plainly instead. No token is checked and nothing is revealed here,
+// because this handler reads no state and performs no action.
+const describeCallback = (req, res) => res.json({
+  ok: true,
+  endpoint: 'AzamPay callback',
+  accepts: 'POST',
+  note: 'This endpoint is live. Callbacks must be sent as POST with the shared token.'
+});
+router.get('/webhook', describeCallback);
+router.get('/callback', describeCallback);
 
 // 3) Order status (the app polls this after checkout).
 router.get('/orders/:id', authRequired, wrap(async (req, res) => {
