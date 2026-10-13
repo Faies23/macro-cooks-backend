@@ -63,6 +63,7 @@ router.post('/checkout', authRequired, wrap(async (req, res) => {
 //    (c) verify the reported amount/currency against the stored order,
 //    (d) re-confirm with the provider when a status API is available,
 //    before granting any entitlement.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const handleWebhook = wrap(async (req, res) => {
   const raw = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body || {});
   // AzamPay sends the shared secret as a ?token= query parameter on the callback URL,
@@ -86,10 +87,15 @@ const handleWebhook = wrap(async (req, res) => {
   if (['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(status)) {
     // Look up the order while it is still pending; anything else is a replay / already-handled.
     // Find by our id, or by the provider_ref we saved at checkout â€” whichever the callback carries.
+    // `id` is a uuid column: only compare it when the callback carried a real uuid,
+    // otherwise Postgres raises "invalid input syntax for type uuid" and the webhook 500s.
+    const idParam = (typeof orderRef === 'string' && UUID_RE.test(orderRef)) ? orderRef : null;
+    const refParam = (typeof txnRef === 'string' && txnRef) ? txnRef : null;
+    if (!idParam && !refParam) return res.status(200).send('ok'); // nothing to match on
     const ord = await query(
       "select id, user_id, product, cycle, amount_tzs, provider_ref from orders " +
       "where status='pending' and (id=$1 or provider_ref=$2) limit 1",
-      [(typeof orderRef === 'string' && orderRef) || null, (typeof txnRef === 'string' && txnRef) || null]
+      [idParam, refParam]
     );
     if (!ord.rows[0]) return res.status(200).send('ok'); // unknown id or already settled -> no-op
 
@@ -147,7 +153,6 @@ router.post('/webhook', handleWebhook);
 router.post('/callback', handleWebhook);
 
 // 3) Order status (the app polls this after checkout).
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 router.get('/orders/:id', authRequired, wrap(async (req, res) => {
   if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'invalid id' });
   const r = await query(
