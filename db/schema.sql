@@ -57,20 +57,30 @@ alter table entitlements add column if not exists created_at timestamptz default
 -- The old schema had primary key (user_id, product), which would block renewals (one row per
 -- payment for the same product). Drop whatever PK exists and make `id` the primary key instead.
 -- Idempotent: re-running is a no-op once `id` is already the PK.
+-- Compare the primary key's COLUMNS, not its name: Postgres calls every primary key
+-- "<table>_pkey", so the old composite key on (user_id, product) is also named
+-- entitlements_pkey and a name check silently leaves it in place. While it is in place a
+-- second payment for the same product raises a duplicate key error, the webhook returns 500
+-- and the customer is charged without their access being extended.
 do $$
-declare pk_name text;
+declare pk_name text; pk_cols text;
 begin
   update entitlements set id = gen_random_uuid() where id is null;
-  select conname into pk_name
-    from pg_constraint
-    where conrelid = 'entitlements'::regclass and contype = 'p';
-  if pk_name is not null and pk_name <> 'entitlements_pkey' then
+  select c.conname,
+         (select string_agg(a.attname, ',' order by k.ord)
+            from unnest(c.conkey) with ordinality k(attnum, ord)
+            join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum)
+    into pk_name, pk_cols
+    from pg_constraint c
+    where c.conrelid = 'entitlements'::regclass and c.contype = 'p';
+
+  if pk_name is not null and pk_cols is distinct from 'id' then
     execute 'alter table entitlements drop constraint ' || quote_ident(pk_name);
+    pk_name := null;
   end if;
-  if not exists (
-    select 1 from pg_constraint
-    where conrelid = 'entitlements'::regclass and contype = 'p'
-  ) then
+
+  if pk_name is null then
+    alter table entitlements alter column id set not null;
     alter table entitlements add primary key (id);
   end if;
 end $$;
