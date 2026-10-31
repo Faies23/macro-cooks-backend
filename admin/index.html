@@ -33,31 +33,96 @@ button{background:#7a2e2e;color:#fff;border:none;border-radius:8px;cursor:pointe
 <div id="list"></div></div>
 
 <script>
-let token='', uid='';
-const api=(p,o={})=>fetch(p,{...o,headers:{'Content-Type':'application/json','Authorization':token?'Bearer '+token:'',...(o.headers||{})}});
-async function login(){
-  const r=await api('/api/auth/login',{method:'POST',body:JSON.stringify({email:email.value,password:password.value})});
-  const j=await r.json(); if(j.token){token=j.token;loginMsg.textContent='Logged in as '+(j.user.role)+'';loginMsg.className='ok';}
-  else {loginMsg.textContent=j.error||'failed';loginMsg.className='err';}
+/* The publish call used to send chef / is_premium / stream_uid. The API reads title / by /
+   free / uid, so every publish came back 400 and no class could ever go live. The names
+   below are the ones the API actually reads. The class list also used to be fetched with no
+   Authorization header against an endpoint that requires one, which is why it always said
+   "None yet" however many classes existed. */
+let token = '', uid = '', busy = false;
+
+const api = (p, o = {}) => fetch(p, Object.assign({}, o, {
+  headers: Object.assign({ 'Content-Type': 'application/json' },
+    token ? { Authorization: 'Bearer ' + token } : {}, o.headers || {})
+}));
+const say = (el, text, cls) => { el.textContent = text; el.className = cls || 'muted'; };
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+async function readJson(r) {
+  try { return await r.json(); }
+  catch (e) { return { error: 'the server answered ' + r.status + ' and not JSON' }; }
 }
-async function upload(){
-  if(!file.files[0]){uploadMsg.textContent='Pick a file first';return;}
-  uploadMsg.textContent='Requesting upload URL...';
-  const r=await api('/api/content/admin/upload-url',{method:'POST'}); const j=await r.json();
-  if(!j.uploadURL){uploadMsg.textContent='Error: '+(j.error||JSON.stringify(j));uploadMsg.className='err';return;}
-  uid=j.uid; uploadMsg.textContent='Uploading to Cloudflare...';
-  const fd=new FormData(); fd.append('file',file.files[0]);
-  const up=await fetch(j.uploadURL,{method:'POST',body:fd});
-  uploadMsg.textContent=up.ok?('Uploaded. Video UID: '+uid):'Upload failed'; uploadMsg.className=up.ok?'ok':'err';
+
+async function login() {
+  const r = await api('/api/auth/login', { method: 'POST',
+    body: JSON.stringify({ email: email.value, password: password.value }) });
+  const j = await readJson(r);
+  if (!r.ok || !j.token) { say(loginMsg, j.error || ('Login failed (' + r.status + ')'), 'err'); return; }
+  token = j.token;
+  if (j.user && j.user.role !== 'admin') {
+    say(loginMsg, 'Signed in, but this account is not an admin, so publishing will be refused.', 'err');
+  } else {
+    say(loginMsg, 'Signed in as admin.', 'ok');
+  }
+  loadClasses();
 }
-async function publish(){
-  if(!uid){publishMsg.textContent='Upload a video first';return;}
-  const r=await api('/api/content/admin/classes',{method:'POST',body:JSON.stringify({title:title.value,chef:chef.value,is_premium:premium.value==='true',stream_uid:uid})});
-  const j=await r.json(); publishMsg.textContent=j.ok?'Published!':(j.error||'failed'); publishMsg.className=j.ok?'ok':'err'; if(j.ok){uid='';loadClasses();}
+
+async function upload() {
+  if (busy) return;
+  if (!token) { say(uploadMsg, 'Log in first', 'err'); return; }
+  if (!file.files[0]) { say(uploadMsg, 'Pick a file first', 'err'); return; }
+  busy = true; uid = '';
+  say(uploadMsg, 'Asking Cloudflare for an upload link...');
+  try {
+    const r = await api('/api/content/admin/upload-url', { method: 'POST' });
+    const j = await readJson(r);
+    if (!r.ok || !j.uploadURL) {
+      say(uploadMsg, 'Could not get an upload link: ' + (j.error || r.status) +
+        '. Check that CF_ACCOUNT_ID and CF_STREAM_TOKEN are set in Render.', 'err');
+      return;
+    }
+    say(uploadMsg, 'Uploading to Cloudflare. A long video can take a while.');
+    const fd = new FormData(); fd.append('file', file.files[0]);
+    const up = await fetch(j.uploadURL, { method: 'POST', body: fd });
+    if (!up.ok) { say(uploadMsg, 'Cloudflare refused the upload (' + up.status + ')', 'err'); return; }
+    uid = j.uid;
+    say(uploadMsg, 'Uploaded. Cloudflare still has to process it, which can take a few ' +
+      'minutes before it will play. Video id ' + uid, 'ok');
+  } catch (e) {
+    say(uploadMsg, 'Upload failed: ' + (e.message || e), 'err');
+  } finally { busy = false; }
 }
-async function loadClasses(){
-  const r=await fetch('/api/content/classes'); const j=await r.json();
-  list.innerHTML=(j.classes||[]).map(c=>'<div>'+(c.is_premium?'⭐ ':'')+c.title+' — <span class="muted">'+(c.chef||'')+'</span></div>').join('')||'<span class="muted">None yet.</span>';
+
+async function publish() {
+  if (!uid) { say(publishMsg, 'Upload a video first', 'err'); return; }
+  if (!title.value.trim()) { say(publishMsg, 'Give the class a title', 'err'); return; }
+  const body = {
+    title: title.value.trim(),
+    by: chef.value.trim(),
+    free: premium.value !== 'true',
+    uid: uid
+  };
+  const r = await api('/api/content/admin/classes', { method: 'POST', body: JSON.stringify(body) });
+  const j = await readJson(r);
+  if (!r.ok || !j.ok) { say(publishMsg, j.error || ('Publish failed (' + r.status + ')'), 'err'); return; }
+  say(publishMsg, 'Published.', 'ok');
+  uid = ''; title.value = ''; chef.value = '';
+  loadClasses();
 }
+
+async function loadClasses() {
+  if (!token) { list.innerHTML = '<span class="muted">Log in to see what is published.</span>'; return; }
+  const r = await api('/api/content/classes');
+  const j = await readJson(r);
+  if (!r.ok) {
+    list.innerHTML = '<span class="err">Could not load the list: ' + esc(j.error || r.status) + '</span>';
+    return;
+  }
+  const rows = j.classes || [];
+  list.innerHTML = rows.length
+    ? rows.map(c => '<div>' + (c.free ? '' : 'Premium. ') + esc(c.title) +
+        ' <span class="muted">' + esc(c.by || '') + '</span></div>').join('')
+    : '<span class="muted">Nothing published yet.</span>';
+}
+
 loadClasses();
 </script></body></html>
