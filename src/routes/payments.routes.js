@@ -58,7 +58,16 @@ router.post('/checkout', authRequired, wrap(async (req, res) => {
         [orderId]).catch(err => console.error('could not close refused order', orderId, err && err.message));
     }
     const detail = process.env.NODE_ENV === 'production' ? undefined : String((e && e.message) || e);
-    return res.status(502).json({ error: 'Payment init failed', orderId, detail });
+    // 'stage' names which half of the handshake failed and contains no credential of any
+    // kind. Without it a failed payment looks identical whether the keys are wrong or the
+    // account is not switched on, and the owner cannot tell who to go and ask.
+    return res.status(502).json({
+      error: 'Payment init failed',
+      orderId,
+      stage: (e && e.stage) || 'unknown',
+      providerMessage: (e && e.providerMessage) || undefined,
+      detail
+    });
   }
   // Save the provider reference so the webhook can match the callback back to this order.
   const providerRef = (pr && (pr.transactionId || pr.reference || pr.id)) || null;
