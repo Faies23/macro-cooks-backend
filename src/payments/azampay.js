@@ -23,7 +23,13 @@ async function getToken() {
       clientSecret: process.env.AZAMPAY_CLIENT_SECRET || ''
     })
   });
-  if (!res.ok) throw new Error('AzamPay token failed: ' + res.status);
+  if (!res.ok) {
+    const err = new Error('AzamPay token failed: ' + res.status);
+    // 'token' means AzamPay refused the credentials themselves, before any payment was
+    // discussed: the app name, client id or client secret does not match what they hold.
+    err.stage = 'token';
+    throw err;
+  }
   const j = await res.json();
   return (j.data && j.data.accessToken) || j.accessToken || j.token;
 }
@@ -50,7 +56,11 @@ async function initiateMobileMoney({ orderRef, amountTzs, amount, phone, network
     })
   });
   const j = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error('AzamPay checkout failed: ' + res.status + ' ' + JSON.stringify(j));
+  if (!res.ok) {
+    const err = new Error('AzamPay checkout failed: ' + res.status + ' ' + JSON.stringify(j));
+    err.stage = 'checkout';
+    throw err;
+  }
 
   // AzamPay answers HTTP 200 even when it REFUSES the request. The body then carries
   // success:false, a message such as "Invalid Vendor", and the literal string "null" as the
@@ -63,6 +73,8 @@ async function initiateMobileMoney({ orderRef, amountTzs, amount, phone, network
   if (j.success === false || !usable) {
     const why = String(j.message || j.messageCode || JSON.stringify(j)).slice(0, 300);
     const err = new Error('AzamPay refused the checkout: ' + why);
+    err.stage = 'declined';
+    err.providerMessage = String(j.message || '').slice(0, 200);
     // The provider answered and declined, so unlike a timeout this outcome is not ambiguous:
     // no prompt was sent and no money can be taken against this order. The caller uses this
     // to close the order instead of leaving it pending forever.
