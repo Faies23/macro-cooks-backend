@@ -51,6 +51,24 @@ async function initiateMobileMoney({ orderRef, amountTzs, amount, phone, network
   });
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error('AzamPay checkout failed: ' + res.status + ' ' + JSON.stringify(j));
+
+  // AzamPay answers HTTP 200 even when it REFUSES the request. The body then carries
+  // success:false, a message such as "Invalid Vendor", and the literal string "null" as the
+  // transaction id. Taking that as a sent push is the worst outcome available here: the
+  // customer is told to approve a prompt that never arrived, and the string "null" is stored
+  // as the provider reference, where it would go on to match any later callback that also
+  // carries no reference. Treat a declined body as the failure it is.
+  const txn = j.transactionId || j.reference || j.id;
+  const usable = txn != null && String(txn).trim() !== '' && String(txn).trim().toLowerCase() !== 'null';
+  if (j.success === false || !usable) {
+    const why = String(j.message || j.messageCode || JSON.stringify(j)).slice(0, 300);
+    const err = new Error('AzamPay refused the checkout: ' + why);
+    // The provider answered and declined, so unlike a timeout this outcome is not ambiguous:
+    // no prompt was sent and no money can be taken against this order. The caller uses this
+    // to close the order instead of leaving it pending forever.
+    err.refused = true;
+    throw err;
+  }
   return j; // expect a transactionId / reference + success flag
 }
 
