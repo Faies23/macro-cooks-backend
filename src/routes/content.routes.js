@@ -135,12 +135,19 @@ router.post('/plan/day', authRequired, wrap(async (req, res) => {
     return res.status(400).json({ error: 'Complete your profile first' });
   }
   const dayIndex = Math.max(0, Math.min(6, parseInt(req.body && req.body.day, 10) || 0));
-  const nonce = Math.max(0, Math.min(9999, parseInt(req.body && req.body.nonce, 10) || 0));
   const products = await activeProducts(req.user.id);
   const unlocked = products.some(p => PLAN_PRODUCTS.includes(p));
   if (dayIndex >= FREE_DAYS && !unlocked) {
     return res.status(402).json({ error: 'Subscribe to unlock the full week' });
   }
+  // Reshuffling is part of what the plan is sold for. An unpaid account is allowed to see
+  // day one, but it kept its own nonce, and ten thousand different nonces meant ten thousand
+  // different free days: not the paid week exactly, but enough variety that paying for it
+  // stopped being the point. Pinning the nonce to zero leaves the free preview as one fixed
+  // day, which is what it was always described as.
+  const nonce = unlocked
+    ? Math.max(0, Math.min(9999, parseInt(req.body && req.body.nonce, 10) || 0))
+    : 0;
   const targets = planEngine.computeTargets(profile);
   res.json({ day: dayIndex, meals: planEngine.buildDay(profile, targets, dayIndex, nonce * 7).meals });
 }));

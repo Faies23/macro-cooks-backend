@@ -49,6 +49,14 @@ router.post('/checkout', authRequired, wrap(async (req, res) => {
     // later SUCCESS callback finds a non-pending order and silently drops the payment.
     // A pending order that never settles costs nothing; a wrongly failed one loses real money.
     console.error('AZAMPAY CHECKOUT ERROR for order', orderId, ':', (e && e.message) || e);
+    // One exception to the paragraph above: when the provider ANSWERED and declined, the
+    // outcome is not ambiguous at all. No prompt was sent, so no money can arrive against
+    // this order, and leaving it pending only fills the pending list with orders that can
+    // never settle. Timeouts and 5xx responses still stay pending, exactly as described.
+    if (e && e.refused) {
+      await query("update orders set status='failed', updated_at=now() where id=$1 and status='pending'",
+        [orderId]).catch(err => console.error('could not close refused order', orderId, err && err.message));
+    }
     const detail = process.env.NODE_ENV === 'production' ? undefined : String((e && e.message) || e);
     return res.status(502).json({ error: 'Payment init failed', orderId, detail });
   }
@@ -140,6 +148,11 @@ const handleWebhook = wrap(async (req, res) => {
     let granted = false;
     try {
       await client.query('begin');
+      // Two callbacks for the same customer and product arriving together would both read
+      // the same max(expires_at) and both extend from it, so the second payment would add no
+      // time at all. Serialise the grant on the pair for the length of this transaction.
+      await client.query('select pg_advisory_xact_lock(hashtext($1::text))',
+        [String(order.user_id) + ':' + String(order.product)]);
       // Idempotent transition: only flips a row that is not already paid.
       const r = await client.query(
         "update orders set status='paid', updated_at=now() where id=$1 and status <> 'paid' " +
