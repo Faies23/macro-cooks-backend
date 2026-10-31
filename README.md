@@ -67,7 +67,7 @@ Then the admin console at `https://your-api/admin` and the `/api/content/admin/*
 | GET | /api/payments/entitlements | user | What the user has unlocked |
 | GET | /api/content/classes | – | List published classes |
 | POST | /api/content/admin/upload-url | admin | One-time Cloudflare upload URL |
-| POST | /api/content/admin/classes | admin | Publish a class `{ title, chef, is_premium, stream_uid }` |
+| POST | /api/content/admin/classes | admin | Publish a class `{ title, by, free, uid }` |
 
 ## Connecting the app
 
