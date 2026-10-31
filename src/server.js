@@ -23,13 +23,28 @@ app.use((req, res, next) => {
   next();
 });
 
-// CORS policy is unchanged from the previous deployment: APP_ORIGIN when set, otherwise open.
-// Setting APP_ORIGIN in Render to your real origin(s) narrows this with no code change.
+// CORS: APP_ORIGIN may now list several origins separated by commas, not just one. The old
+// single-value form keeps working. The native origins below are always allowed, because the
+// Android and iPhone builds load the same page from a local WebView origin rather than from
+// the website, so a list that named only the website would lock the installed apps out.
 // Note this API authenticates with Bearer tokens and uses no cookies, so CORS is not what
 // protects it; the rate limiting and the auth checks are.
-app.use(cors({ origin: process.env.APP_ORIGIN || '*' }));
+const NATIVE_ORIGINS = ['https://localhost', 'http://localhost', 'capacitor://localhost', 'ionic://localhost'];
+const allowedOrigins = String(process.env.APP_ORIGIN || '')
+  .split(',').map(function (s) { return s.trim(); }).filter(Boolean)
+  .concat(NATIVE_ORIGINS);
+app.use(cors({
+  origin: process.env.APP_ORIGIN
+    // A request that carries no Origin header at all (a mobile WebView, curl, a server call)
+    // is allowed through: there is no cookie for a browser to replay, so refusing it would
+    // break the apps without adding any protection.
+    ? function (origin, cb) { cb(null, !origin || allowedOrigins.indexOf(origin) >= 0); }
+    : '*'
+}));
 if (!process.env.APP_ORIGIN) {
   console.warn('[cors] APP_ORIGIN is not set, so any origin is accepted. Set it to your real origin(s) to narrow this.');
+} else {
+  console.log('[cors] allowed origins: ' + allowedOrigins.join(' '));
 }
 
 // Capture the raw body so payment webhooks can verify their signature.
