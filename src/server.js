@@ -90,15 +90,30 @@ function rateLimit({ windowMs, max, message, key }) {
 // password is an attack on one account no matter where it comes from, so the account is the
 // right thing to count. The separate per-IP limiter below still catches a flood from one
 // source, and falls back to the IP only when no email was supplied.
-const authKey = (req) => {
-  const email = req.body && typeof req.body.email === 'string'
-    ? req.body.email.trim().toLowerCase() : '';
-  if (email) return 'acct:' + email;
-  return 'ip:' + (req.ip || (req.connection && req.connection.remoteAddress) || 'unknown');
+const clientIp = (req) => req.ip || (req.connection && req.connection.remoteAddress) || 'unknown';
+const emailOf = (req) => (req.body && typeof req.body.email === 'string')
+  ? req.body.email.trim().toLowerCase() : '';
+// Counting the account on its own went too far the other way: twenty one wrong passwords
+// aimed at a customer's address and that customer could no longer sign in either, which is a
+// way to lock a paying user out of the app rather than a way to protect them. Counting the
+// pair (account, source) keeps what matters, because one attacker still runs out of guesses
+// after twenty, while a customer on a different connection is never affected. The looser
+// per-account ceiling behind it still catches a run spread across many addresses.
+const authPairKey = (req) => {
+  const e = emailOf(req);
+  return e ? 'pair:' + e + '|' + clientIp(req) : 'ip:' + clientIp(req);
+};
+const authAcctKey = (req) => {
+  const e = emailOf(req);
+  return e ? 'acct:' + e : 'ip:' + clientIp(req);
 };
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 20, key: authKey,
+  windowMs: 15 * 60 * 1000, max: 20, key: authPairKey,
   message: 'Too many attempts, try again in a few minutes'
+});
+const authAcctLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 100, key: authAcctKey,
+  message: 'Too many attempts on this account, try again later'
 });
 const authIpLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 300,
@@ -112,7 +127,7 @@ app.get('/health', (req, res) =>
   res.json({ ok: true, service: 'macro-cooks-backend', time: new Date().toISOString() }));
 
 app.use('/api/', apiLimiter);
-app.use('/api/auth', authIpLimiter, authLimiter, require('./routes/auth.routes'));
+app.use('/api/auth', authIpLimiter, authAcctLimiter, authLimiter, require('./routes/auth.routes'));
 app.use('/api/profile', require('./routes/profile.routes'));
 app.use('/api/payments', require('./routes/payments.routes'));
 app.use('/api/content', require('./routes/content.routes'));
