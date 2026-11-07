@@ -167,6 +167,14 @@ const handleWebhook = wrap(async (req, res) => {
   }
 
   const evt = req.body || {};
+  // One line per accepted confirmation, so the log always shows what AzamPay reported for an
+  // order, including ones that match nothing here and would otherwise leave no trace.
+  console.log('[webhook] accepted via ' + matched[0] +
+    ': status=' + String(evt.transactionstatus || evt.status || '?') +
+    ' order=' + String(evt.utilityref || evt.externalId || evt.orderId || '?').slice(0, 40) +
+    ' amount=' + String(evt.amount || '?') +
+    ' operator=' + String(evt.operator || evt.provider || '?') +
+    ' ref=' + String(evt.reference || evt.transactionId || evt.transid || '?').slice(0, 40));
   // Match on our order id first; fall back to the provider's transaction reference.
   const orderRef = evt.utilityref || evt.externalId || evt.orderReference || evt.orderId;
   const txnRef = evt.transactionId || evt.reference || evt.transactionref || null;
