@@ -16,11 +16,54 @@ const USD_TZS = parseFloat(process.env.USD_TZS) || 2600;
 //      product = plan | recipes | full
 //      cycle   = mo (30 days) | yr (365 days)
 //      network = Mpesa | Tigo | Airtel | Halopesa | Azampesa
+// AzamPay's provider names, keyed the way the app and older clients may send them.
+const NETWORKS = {
+  tigo: { provider: 'Tigo', label: 'Mixx by Yas' },
+  mixx: { provider: 'Tigo', label: 'Mixx by Yas' },
+  airtel: { provider: 'Airtel', label: 'Airtel Money' },
+  mpesa: { provider: 'Mpesa', label: 'M-Pesa' },
+  'm-pesa': { provider: 'Mpesa', label: 'M-Pesa' },
+  halopesa: { provider: 'Halopesa', label: 'Halopesa' },
+  azampesa: { provider: 'Azampesa', label: 'AzamPesa' }
+};
+
+// Returns the number as 0XXXXXXXXX, or null when it is not a Tanzanian mobile number.
+function normaliseTzMobile(raw) {
+  let d = String(raw || '').replace(/[^0-9]/g, '');
+  if (d.startsWith('255') && d.length === 12) d = '0' + d.slice(3);
+  else if (d.length === 9 && /^[67]/.test(d)) d = '0' + d;
+  return /^0[67][0-9]{8}$/.test(d) ? d : null;
+}
+
+function customerMessage(e, net) {
+  const stage = e && e.stage;
+  const said = String((e && e.providerMessage) || '');
+  if (stage === 'declined' && /invalid vendor/i.test(said)) {
+    return net.label + ' payments are not switched on yet. Please choose another mobile network.';
+  }
+  if (stage === 'declined') {
+    return net.label + ' could not start this payment. Check that the number is registered for ' +
+      net.label + ' and try again.';
+  }
+  if (stage === 'token') return 'Payments are briefly unavailable. Please try again in a few minutes.';
+  return 'We could not start the payment. Please try again.';
+}
+
 router.post('/checkout', authRequired, wrap(async (req, res) => {
   const { product, cycle, phone, network } = req.body || {};
   if (!isProduct(product)) return res.status(400).json({ error: 'Unknown product' });
   if (!isCycle(cycle)) return res.status(400).json({ error: 'Unknown cycle' });
   if (phone != null && typeof phone !== 'string') return res.status(400).json({ error: 'invalid phone' });
+
+  // Customers type numbers every way there is: +255 7.., 255 7.., 07.., with spaces and
+  // dashes. Charge one clean local form, and refuse anything that is not a Tanzanian mobile
+  // number here, where the customer can be told plainly, rather than at the network.
+  const msisdn = normaliseTzMobile(phone);
+  if (!msisdn) {
+    return res.status(400).json({ error: 'Enter your mobile number like 0712 345 678' });
+  }
+  const net = NETWORKS[String(network || '').toLowerCase()];
+  if (!net) return res.status(400).json({ error: 'Choose a mobile network' });
 
   // SINGLE SOURCE OF TRUTH: amount comes from the server price table, never the client.
   const usd = getAmount(product, cycle);
@@ -30,14 +73,14 @@ router.post('/checkout', authRequired, wrap(async (req, res) => {
   const o = await query(
     'insert into orders(user_id,product,cycle,amount_usd,amount_tzs,method,phone,status) ' +
     "values($1,$2,$3,$4,$5,'mobile_money',$6,'pending') returning id",
-    [req.user.id, product, cycle, usd, tzs, phone || null]
+    [req.user.id, product, cycle, usd, tzs, msisdn]
   );
   const orderId = o.rows[0].id;
 
   let pr;
   try {
     // Forward the amount (TZS), phone and network to the AzamPay MNO checkout push.
-    pr = await provider.initiateMobileMoney({ orderRef: orderId, amountTzs: tzs, phone, network });
+    pr = await provider.initiateMobileMoney({ orderRef: orderId, amountTzs: tzs, phone: msisdn, network: net.provider });
   } catch (e) {
     // Surface the provider's actual reason in the Render logs. Vital during sandbox
     // integration: field names and URLs must match AzamPay's current docs.
@@ -62,7 +105,9 @@ router.post('/checkout', authRequired, wrap(async (req, res) => {
     // kind. Without it a failed payment looks identical whether the keys are wrong or the
     // account is not switched on, and the owner cannot tell who to go and ask.
     return res.status(502).json({
-      error: 'Payment init failed',
+      // What the customer reads. The provider's own wording ("contact system admin") means
+      // nothing to them, so it is translated here into the one thing they can act on.
+      error: customerMessage(e, net),
       orderId,
       stage: (e && e.stage) || 'unknown',
       providerMessage: (e && e.providerMessage) || undefined,
