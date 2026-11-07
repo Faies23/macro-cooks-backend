@@ -154,7 +154,7 @@ const handleWebhook = wrap(async (req, res) => {
     // a rejected confirmation could have been a payment the customer had already made.
     const e0 = req.body || {};
     console.warn('[webhook] rejected: callback token did not match AZAMPAY_CALLBACK_TOKEN.' +
-      ' expected ' + provider.tokenPrint(process.env.AZAMPAY_CALLBACK_TOKEN) +
+      ' expected ' + provider.tokenPrint(provider.configuredCallbackToken()) +
       '; received ' + (candidates.length
         ? candidates.map(c => c[0] + ' ' + provider.tokenPrint(c[1])).join(', ')
         : 'no token anywhere') +
