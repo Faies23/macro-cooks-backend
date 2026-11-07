@@ -110,8 +110,25 @@ async function getTransactionStatus(ref) {
  *    SECURITY: this FAILS CLOSED. With no token configured we reject every callback,
  *    so a misconfigured deployment can't be tricked into granting paid access for free.
  */
+// The setting is meant to hold only the token, but the natural thing to paste is the whole
+// callback URL that was given to AzamPay, and that is what happened in production: Render
+// held all 132 characters of the address while AzamPay sent the 64-character token after
+// ?token=, so every payment confirmation was rejected. When the setting is a URL, use its
+// token part. The comparison below is still exact; nothing extra is accepted.
+function configuredCallbackToken() {
+  const raw = String(process.env.AZAMPAY_CALLBACK_TOKEN || '').trim();
+  if (/^https?:\/\//i.test(raw)) {
+    try { return new URL(raw).searchParams.get('token') || ''; } catch (e) { return ''; }
+  }
+  return raw;
+}
+if (/^https?:\/\//i.test(String(process.env.AZAMPAY_CALLBACK_TOKEN || '').trim())) {
+  console.warn('[azampay] AZAMPAY_CALLBACK_TOKEN holds a full URL; using its ?token= part. ' +
+    'Set it to the token alone to silence this.');
+}
+
 function verifyWebhook(rawBody, signatureHeader) {
-  const expected = process.env.AZAMPAY_CALLBACK_TOKEN || '';
+  const expected = configuredCallbackToken();
   if (!expected) {
     console.warn('[azampay] AZAMPAY_CALLBACK_TOKEN not set — rejecting webhook (fail closed).');
     return false;
@@ -129,4 +146,4 @@ function tokenPrint(v) {
   if (!s) return '(empty)';
   return 'len ' + s.length + ' sha256:' + crypto.createHash('sha256').update(s).digest('hex').slice(0, 12);
 }
-module.exports = { getToken, initiateMobileMoney, verifyWebhook, getTransactionStatus, tokenPrint };
+module.exports = { getToken, initiateMobileMoney, verifyWebhook, getTransactionStatus, tokenPrint, configuredCallbackToken };
