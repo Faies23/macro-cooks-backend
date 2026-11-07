@@ -137,12 +137,32 @@ const handleWebhook = wrap(async (req, res) => {
   // AzamPay sends the shared secret as a ?token= query parameter on the callback URL,
   // so we accept that as well as the header forms. Header is preferred (query strings can
   // appear in access logs); the check still fails closed when no token matches.
-  const sig = req.headers['x-azampay-signature']
-    || req.headers['authorization']
-    || (req.query && (req.query.token || req.query.Token))
-    || '';
-  if (!provider.verifyWebhook(raw, sig)) {
-    console.warn('[webhook] rejected: callback token did not match AZAMPAY_CALLBACK_TOKEN');
+  //
+  // This used to take the FIRST value it found, in header order. A caller that also sent an
+  // Authorization header of its own had that header checked instead, and the correct ?token=
+  // in the URL was never looked at, so a genuine payment confirmation was thrown away. Every
+  // place the token can arrive is now checked, and any one of them matching is enough.
+  const q = req.query || {};
+  const candidates = [
+    ['x-azampay-signature', req.headers['x-azampay-signature']],
+    ['authorization', req.headers['authorization']],
+    ['query token', q.token || q.Token]
+  ].filter(c => c[1]).map(c => [c[0], String(c[1])]);
+  const matched = candidates.find(c => provider.verifyWebhook(raw, c[1]));
+  if (!matched) {
+    // Say exactly what arrived, as fingerprints, and what the callback reported. Without this
+    // a rejected confirmation could have been a payment the customer had already made.
+    const e0 = req.body || {};
+    console.warn('[webhook] rejected: callback token did not match AZAMPAY_CALLBACK_TOKEN.' +
+      ' expected ' + provider.tokenPrint(process.env.AZAMPAY_CALLBACK_TOKEN) +
+      '; received ' + (candidates.length
+        ? candidates.map(c => c[0] + ' ' + provider.tokenPrint(c[1])).join(', ')
+        : 'no token anywhere') +
+      '; callback status=' + String(e0.transactionstatus || e0.status || '?') +
+      ' order=' + String(e0.utilityref || e0.externalId || e0.orderId || '?').slice(0, 40) +
+      ' amount=' + String(e0.amount || '?') +
+      ' operator=' + String(e0.operator || e0.provider || '?') +
+      ' ref=' + String(e0.reference || e0.transactionId || e0.transid || '?').slice(0, 40));
     return res.status(401).send('bad signature');
   }
 
