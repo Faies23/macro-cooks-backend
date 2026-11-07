@@ -23,7 +23,7 @@ const NETWORKS = {
   airtel: { provider: 'Airtel', label: 'Airtel Money' },
   mpesa: { provider: 'Mpesa', label: 'M-Pesa' },
   'm-pesa': { provider: 'Mpesa', label: 'M-Pesa' },
-  halopesa: { provider: 'Halopesa', label: 'Halopesa' },
+  halopesa: { provider: 'Halopesa', label: 'HaloPesa' },
   azampesa: { provider: 'Azampesa', label: 'AzamPesa' }
 };
 
@@ -35,18 +35,52 @@ function normaliseTzMobile(raw) {
   return /^0[67][0-9]{8}$/.test(d) ? d : null;
 }
 
+// What the operator says, turned into the one thing the customer can act on. Their own words
+// ("Please contact system admin", "Error While sending the request") mean nothing to a
+// customer, and "balance is not enough" deserves to be said plainly rather than as a failure.
+function reasonFor(said, label) {
+  const s = String(said || '');
+  if (/invalid vendor/i.test(s)) {
+    return label + ' payments are not switched on yet. Please choose another mobile network.';
+  }
+  if (/balance|insufficient|not enough/i.test(s)) {
+    return 'Your ' + label + ' balance is not enough for this payment. Top up and try again.';
+  }
+  if (/on ?going ussd|another .{0,20}session/i.test(s)) {
+    return 'Your phone already has a payment prompt or USSD menu open. Close it, then try again.';
+  }
+  if (/time ?out|timed out|expire/i.test(s)) {
+    return 'The PIN prompt timed out before it was approved. Please try again.';
+  }
+  if (/cancel|reject|declin/i.test(s)) return 'The payment was cancelled on the phone.';
+  if (/\bpin\b/i.test(s)) return 'The PIN was not accepted. Please try again.';
+  if (/sender is not available|not registered|invalid (msisdn|number|account)|subscriber/i.test(s)) {
+    return 'That number is not registered for ' + label + '. Check the number and the network.';
+  }
+  return label + ' could not complete this payment. Please try again, or choose another network.';
+}
+
+// Why an order failed, kept for a couple of hours so the app, which is polling the order at
+// that moment, can tell the customer. There is no column for it, and the reason only matters
+// while someone is looking at the payment screen, so memory is enough.
+const failureReasons = new Map();
+function rememberFailure(orderId, text) {
+  if (!orderId) return;
+  failureReasons.set(String(orderId), { text, at: Date.now() });
+  const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+  for (const [k, v] of failureReasons) if (v.at < cutoff) failureReasons.delete(k);
+}
+
 function customerMessage(e, net) {
   const stage = e && e.stage;
   const said = String((e && e.providerMessage) || '');
-  if (stage === 'declined' && /invalid vendor/i.test(said)) {
-    return net.label + ' payments are not switched on yet. Please choose another mobile network.';
-  }
-  if (stage === 'declined') {
-    return net.label + ' could not start this payment. Check that the number is registered for ' +
-      net.label + ' and try again.';
-  }
+  if (stage === 'declined') return reasonFor(said, net.label);
   if (stage === 'token') return 'Payments are briefly unavailable. Please try again in a few minutes.';
-  return 'We could not start the payment. Please try again.';
+  // Anything else is uncertain: the network may have sent the PIN prompt before the error came
+  // back, which is exactly why the order is left open. Telling the customer it failed would
+  // invite them to pay a second time.
+  return 'We could not confirm the request with ' + net.label + '. If a PIN prompt reaches your ' +
+    'phone, approve it and your plan unlocks by itself.';
 }
 
 router.post('/checkout', authRequired, wrap(async (req, res) => {
@@ -97,6 +131,7 @@ router.post('/checkout', authRequired, wrap(async (req, res) => {
     // this order, and leaving it pending only fills the pending list with orders that can
     // never settle. Timeouts and 5xx responses still stay pending, exactly as described.
     if (e && e.refused) {
+      rememberFailure(orderId, customerMessage(e, net));
       await query("update orders set status='failed', updated_at=now() where id=$1 and status='pending'",
         [orderId]).catch(err => console.error('could not close refused order', orderId, err && err.message));
     }
@@ -110,6 +145,9 @@ router.post('/checkout', authRequired, wrap(async (req, res) => {
       error: customerMessage(e, net),
       orderId,
       stage: (e && e.stage) || 'unknown',
+      // True when the order is still open because the outcome is not known. The app watches it
+      // instead of offering to start another payment on top of one that may already be live.
+      pending: !(e && (e.refused || e.stage === 'token')),
       providerMessage: (e && e.providerMessage) || undefined,
       detail
     });
@@ -174,7 +212,8 @@ const handleWebhook = wrap(async (req, res) => {
     ' order=' + String(evt.utilityref || evt.externalId || evt.orderId || '?').slice(0, 40) +
     ' amount=' + String(evt.amount || '?') +
     ' operator=' + String(evt.operator || evt.provider || '?') +
-    ' ref=' + String(evt.reference || evt.transactionId || evt.transid || '?').slice(0, 40));
+    ' ref=' + String(evt.reference || evt.transactionId || evt.transid || '?').slice(0, 40) +
+    ' message=' + String(evt.message || evt.remarks || evt.reason || '').slice(0, 120));
   // Match on our order id first; fall back to the provider's transaction reference.
   const orderRef = evt.utilityref || evt.externalId || evt.orderReference || evt.orderId;
   const txnRef = evt.transactionId || evt.reference || evt.transactionref || null;
@@ -272,10 +311,15 @@ const handleWebhook = wrap(async (req, res) => {
     // Uses the same guarded params as the success branch: a non-uuid reference is
     // nulled out, so a real mobile-money code like MPESA9TZ8KQ0X2 can no longer
     // raise "invalid input syntax for type uuid" and turn this into an HTTP 500.
-    await query(
-      "update orders set status='failed', updated_at=now() where status='pending' and (id=$1 or provider_ref=$2)",
+    const failed = await query(
+      "update orders set status='failed', updated_at=now() where status='pending' and (id=$1 or provider_ref=$2) " +
+      'returning id',
       [idParam, refParam]
     );
+    const op = String(evt.operator || evt.provider || '');
+    const label = (NETWORKS[op.toLowerCase()] || {}).label || op || 'Your network';
+    const text = reasonFor(evt.message || evt.remarks || evt.reason, label);
+    failed.rows.forEach(row => rememberFailure(row.id, text));
   }
   res.status(200).send('ok');
 });
@@ -306,7 +350,8 @@ router.get('/orders/:id', authRequired, wrap(async (req, res) => {
     [req.params.id, req.user.id]
   );
   if (!r.rows[0]) return res.status(404).json({ error: 'not found' });
-  res.json({ status: r.rows[0].status, order: r.rows[0] });
+  const why = r.rows[0].status === 'failed' ? failureReasons.get(String(r.rows[0].id)) : null;
+  res.json({ status: r.rows[0].status, order: r.rows[0], reason: why ? why.text : undefined });
 }));
 
 // 4) Entitlements: the ACTIVE product names the user currently holds (expires_at in the future).
