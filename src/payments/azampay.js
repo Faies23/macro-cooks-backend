@@ -122,4 +122,11 @@ function verifyWebhook(rawBody, signatureHeader) {
   if (a.length !== b.length) return false;
   try { return crypto.timingSafeEqual(a, b); } catch (e) { return false; }
 }
-module.exports = { getToken, initiateMobileMoney, verifyWebhook, getTransactionStatus };
+// A one-way fingerprint for the logs: enough to tell two values apart, or to match one
+// against a known candidate offline, and useless for recovering the value itself.
+function tokenPrint(v) {
+  const s = String(v == null ? '' : v).replace(/^Bearer\s+/i, '');
+  if (!s) return '(empty)';
+  return 'len ' + s.length + ' sha256:' + crypto.createHash('sha256').update(s).digest('hex').slice(0, 12);
+}
+module.exports = { getToken, initiateMobileMoney, verifyWebhook, getTransactionStatus, tokenPrint };
