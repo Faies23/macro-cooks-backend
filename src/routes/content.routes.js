@@ -88,6 +88,25 @@ async function activeProducts(userId) {
   return r.rows.map(x => x.product);
 }
 
+// Four food names were corrected in November 2026. Apps installed before that (Android 2.6 and
+// earlier) carry their own name rules and translation files, and do not know the new spellings:
+// their meal lines would fall back to English and Maandazi would lose its High GI badge. The
+// new app says it knows them by sending names=2; everyone else keeps getting the old spellings.
+const LEGACY_NAMES = [
+  ['Chickpeas (dengu)', 'Chickpeas (mbaazi)'],
+  ['Lentils (adesi)', 'Lentils (dengu)'],
+  ['red lentils (adesi)', 'red lentils (dengu)'],
+  ['African eggplant (nyanya chungu)', 'African eggplant (ngogwe)'],
+  ['Maandazi', 'Mandazi']
+];
+function forClient(req, payload) {
+  const v = (req.body && req.body.names) || (req.query && req.query.names);
+  if (String(v) === '2') return payload;
+  let s = JSON.stringify(payload);
+  LEGACY_NAMES.forEach(([now, old]) => { s = s.split(now).join(old); });
+  return JSON.parse(s);
+}
+
 // The app posts the profile it collected during onboarding. Nothing here is trusted for
 // access: entitlement is read from the database, never from the request.
 function readProfile(body) {
@@ -118,14 +137,14 @@ router.post('/plan', authRequired, wrap(async (req, res) => {
   const unlocked = products.some(p => PLAN_PRODUCTS.includes(p));
   const targets = planEngine.computeTargets(profile);
   const days = planEngine.buildPlan(profile, targets, unlocked ? 7 : FREE_DAYS);
-  res.json({
+  res.json(forClient(req, {
     targets,
     days,
     unlocked,
     totalDays: 7,
     monthKey: planEngine.monthKey(),
     locked: unlocked ? 0 : 7 - FREE_DAYS
-  });
+  }));
 }));
 
 // Reshuffle a single day. Day 1 is free; the rest need an active plan.
@@ -149,7 +168,7 @@ router.post('/plan/day', authRequired, wrap(async (req, res) => {
     ? Math.max(0, Math.min(9999, parseInt(req.body && req.body.nonce, 10) || 0))
     : 0;
   const targets = planEngine.computeTargets(profile);
-  res.json({ day: dayIndex, meals: planEngine.buildDay(profile, targets, dayIndex, nonce * 7).meals });
+  res.json(forClient(req, { day: dayIndex, meals: planEngine.buildDay(profile, targets, dayIndex, nonce * 7).meals }));
 }));
 
 router.get('/recipes', authRequired, wrap(async (req, res) => {
@@ -157,12 +176,12 @@ router.get('/recipes', authRequired, wrap(async (req, res) => {
   const unlocked = products.some(p => RECIPE_PRODUCTS.includes(p));
   if (!unlocked) {
     // Titles only, so the app can show what is on offer without giving it away.
-    return res.json({
+    return res.json(forClient(req, {
       unlocked: false,
       recipes: planEngine.RECIPES.map(r => ({ id: r.id, title: r.title, meta: r.meta, locked: true }))
-    });
+    }));
   }
-  res.json({ unlocked: true, recipes: planEngine.RECIPES });
+  res.json(forClient(req, { unlocked: true, recipes: planEngine.RECIPES }));
 }));
 
 module.exports = router;
