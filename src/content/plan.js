@@ -31,8 +31,8 @@ const FOODS = [
   { n: "Boiled eggs (2)", e: "\u{1F95A}", kcal: 155, p: 13, c: 1, f: 11, tag: ["egg", "bf"] },
   /* Plant proteins / legumes */
   { n: "Maharage (kidney beans)", e: "\u{1FAD8}", kcal: 245, p: 15, c: 45, f: 1, tag: ["plantpro", "carb", "ea"] },
-  { n: "Lentils (dengu)", e: "\u{1FAD8}", kcal: 230, p: 18, c: 40, f: 1, tag: ["plantpro", "carb"] },
-  { n: "Chickpeas (mbaazi)", e: "\u{1FAD8}", kcal: 269, p: 15, c: 45, f: 4, tag: ["plantpro", "carb", "ea"] },
+  { n: "Lentils (adesi)", e: "\u{1FAD8}", kcal: 230, p: 18, c: 40, f: 1, tag: ["plantpro", "carb"] },
+  { n: "Chickpeas (dengu)", e: "\u{1FAD8}", kcal: 269, p: 15, c: 45, f: 4, tag: ["plantpro", "carb", "ea"] },
   { n: "Cowpeas (kunde)", e: "\u{1FAD8}", kcal: 200, p: 13, c: 35, f: 1, tag: ["plantpro", "carb", "ea"] },
   { n: "Tofu", e: "⬜", kcal: 144, p: 15, c: 3, f: 9, tag: ["plantpro"] },
   /* Dairy */
@@ -45,7 +45,7 @@ const FOODS = [
   { n: "Pumpkin leaves (majani ya maboga)", e: "\u{1F96C}", kcal: 40, p: 4, c: 7, f: 1, tag: ["veg", "ea"] },
   { n: "Jute mallow (mlenda)", e: "\u{1F96C}", kcal: 38, p: 5, c: 6, f: 0, tag: ["veg", "ea"] },
   { n: "Okra (bamia)", e: "\u{1F33F}", kcal: 33, p: 2, c: 7, f: 0, tag: ["veg", "ea"] },
-  { n: "African eggplant (ngogwe)", e: "\u{1F346}", kcal: 35, p: 1, c: 8, f: 0, tag: ["veg", "ea"] },
+  { n: "African eggplant (nyanya chungu)", e: "\u{1F346}", kcal: 35, p: 1, c: 8, f: 0, tag: ["veg", "ea"] },
   { n: "Pumpkin (maboga)", e: "\u{1F383}", kcal: 49, p: 2, c: 12, f: 0, tag: ["veg", "ea"] },
   { n: "Cabbage (kabichi)", e: "\u{1F96C}", kcal: 50, p: 3, c: 11, f: 0, tag: ["veg"] },
   { n: "Green beans", e: "\u{1FADB}", kcal: 44, p: 2, c: 10, f: 0, tag: ["veg"] },
@@ -65,20 +65,20 @@ const FOODS = [
   { n: "Cashews (korosho)", e: "\u{1F95C}", kcal: 160, p: 5, c: 9, f: 13, tag: ["snack", "fat", "ea"] },
   { n: "Almonds", e: "\u{1F330}", kcal: 164, p: 6, c: 6, f: 14, tag: ["snack", "fat"] },
   { n: "Roasted maize (mahindi)", e: "\u{1F33D}", kcal: 130, p: 4, c: 27, f: 2, tag: ["snack", "ea"] },
-  { n: "Mandazi", e: "\u{1F369}", kcal: 200, p: 4, c: 30, f: 7, tag: ["snack", "ea"] }
+  { n: "Maandazi", e: "\u{1F369}", kcal: 200, p: 4, c: 30, f: 7, tag: ["snack", "ea"] }
 ];
 
 // Only the fields the generator needs. The descriptive copy stays in the app.
 const CONDITIONS = [
-  { id: "diabetes", carbControl: true, limit: ["Mandazi", "Wali (rice)", "Mango (embe)", "Pineapple (nanasi)", "Watermelon (tikiti)"] },
-  { id: "pcos", carbControl: true, limit: ["Mandazi", "Wali (rice)", "Pineapple (nanasi)", "Watermelon (tikiti)"] },
-  { id: "hypertension", lowSodium: true, limit: ["Mandazi", "Chapati", "Dagaa (sardines)"] },
-  { id: "ulcers", gentle: true, limit: ["Mandazi", "Chapati", "Orange (chungwa)", "Pineapple (nanasi)", "Kachumbari (tomato & onion)"] },
-  { id: "cholesterol", lowSatFat: true, limit: ["Mandazi", "Chapati", "Goat meat (mbuzi)", "Nyama choma (lean beef)"] }
+  { id: "diabetes", carbControl: true, limit: ["Maandazi", "Wali (rice)", "Mango (embe)", "Pineapple (nanasi)", "Watermelon (tikiti)"] },
+  { id: "pcos", carbControl: true, limit: ["Maandazi", "Wali (rice)", "Pineapple (nanasi)", "Watermelon (tikiti)"] },
+  { id: "hypertension", lowSodium: true, limit: ["Maandazi", "Chapati", "Dagaa (sardines)"] },
+  { id: "ulcers", gentle: true, limit: ["Maandazi", "Chapati", "Orange (chungwa)", "Pineapple (nanasi)", "Kachumbari (tomato & onion)"] },
+  { id: "cholesterol", lowSatFat: true, limit: ["Maandazi", "Chapati", "Goat meat (mbuzi)", "Nyama choma (lean beef)"] }
 ];
 
 const ACT = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725, athlete: 1.9 };
-const HIGH_GI = /wali|white rice|ugali|maize|white bread|mandazi|chapati|plantain|cassava|muhogo/i;
+const HIGH_GI = /wali|white rice|ugali|maize|white bread|andazi|chapati|plantain|cassava|muhogo/i;
 
 function hasCondition(p, flag) {
   return ((p && p.conditions) || []).some(id => {
@@ -208,7 +208,7 @@ const RECIPES = [
     id: "lentil-uji",
     title: "Savoury lentil uji for steady energy",
     meta: "Serves 2 · 300 kcal/serv · 18g protein",
-    ingredients: ["1/2 cup red lentils (dengu)", "1/4 cup millet flour", "1 small onion, 1 carrot", "1 tsp oil, cumin, salt", "Squeeze of lemon"],
+    ingredients: ["1/2 cup red lentils (adesi)", "1/4 cup millet flour", "1 small onion, 1 carrot", "1 tsp oil, cumin, salt", "Squeeze of lemon"],
     steps: ["Rinse the lentils and simmer in 2 cups water for 12 min.", "Whisk the millet flour into 1/2 cup cold water until smooth.", "Stir the slurry into the lentils and cook 5 min, stirring.", "Soften onion and carrot in the oil with cumin, then fold in.", "Season, finish with lemon, and serve warm."]
   }
 ];
