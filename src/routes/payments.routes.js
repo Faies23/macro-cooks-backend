@@ -3,6 +3,7 @@ const { pool, query } = require('../db');
 const { authRequired } = require('../auth');
 const provider = require('../payments/azampay'); // active provider (swap this require to change provider)
 const { getAmount, getDays, isProduct, isCycle } = require('../pricing');
+const { notifyMacrosOS } = require('../integrations/macrosos');
 
 // Wrap async handlers so any rejection reaches the central error middleware instead of hanging.
 const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -233,7 +234,7 @@ const handleWebhook = wrap(async (req, res) => {
     // the provider telling us the money actually moved. Idempotency is preserved because a
     // row that is already 'paid' is excluded here and in the guarded update below.
     const ord = await query(
-      "select id, user_id, product, cycle, amount_tzs, provider_ref from orders " +
+      "select id, user_id, product, cycle, amount_tzs, provider_ref, phone from orders " +
       "where status <> 'paid' and (id=$1 or provider_ref=$2) limit 1",
       [idParam, refParam]
     );
@@ -305,7 +306,37 @@ const handleWebhook = wrap(async (req, res) => {
     } finally {
       client.release();
     }
-    if (granted) console.log('[webhook] settled order', order.id);
+    if (granted) {
+      console.log('[webhook] settled order', order.id);
+      // Tell Macros OS about the sale, so the company books write themselves. Never let this
+      // affect the settlement that just happened: any failure here only logs.
+      query('select email, name from users where id=$1', [order.user_id]).then(u => {
+        const usr = (u.rows && u.rows[0]) || {};
+        const label = ({ plan: 'Meal plan', recipes: 'Recipes', full: 'Full access' })[order.product]
+          || String(order.product || 'subscription');
+        const cyc = order.cycle === 'yr' ? 'yearly' : 'monthly';
+        return notifyMacrosOS({
+          source: 'macrocooks',
+          externalId: String(order.id),
+          orderNo: 'APP-' + String(order.id).slice(0, 8),
+          date: new Date().toISOString().slice(0, 10),
+          customer: {
+            name: usr.name || usr.email || 'App customer',
+            phone: order.phone || '',
+            email: usr.email || ''
+          },
+          items: [{
+            name: 'Macro Cooks app: ' + label + ' subscription (' + cyc + ')',
+            qty: 1,
+            price: Number(order.amount_tzs) || 0
+          }],
+          total: Number(order.amount_tzs) || 0,
+          paid: Number(order.amount_tzs) || 0,
+          method: 'AzamPay mobile money',
+          ref: String(txnRef || order.provider_ref || order.id)
+        });
+      }).catch(e => console.error('[macrosos] could not forward order', order.id, ':', (e && e.message) || e));
+    }
   } else if (['FAILED', 'FAILURE', 'CANCELLED'].includes(status)) {
     // Never let a late/forged FAILED downgrade an order that is already paid.
     // Uses the same guarded params as the success branch: a non-uuid reference is
