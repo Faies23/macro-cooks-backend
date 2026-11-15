@@ -131,6 +131,7 @@ app.use('/api/auth', authIpLimiter, authAcctLimiter, authLimiter, require('./rou
 app.use('/api/profile', require('./routes/profile.routes'));
 app.use('/api/payments', require('./routes/payments.routes'));
 app.use('/api/content', require('./routes/content.routes'));
+app.use('/api/integrations', require('./routes/integrations.routes'));
 
 // Minimal admin dashboard for testing uploads.
 app.use('/admin', express.static(path.join(__dirname, '..', 'admin')));
